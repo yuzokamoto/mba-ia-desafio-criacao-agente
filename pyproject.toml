@@ -1,0 +1,21 @@
+[project]
+name = "aurora"
+version = "0.1.0"
+description = "Assistente do Residencial Aurora"
+requires-python = ">=3.12"
+dependencies = ["google-adk==2.13.0", "fastapi", "uvicorn", "python-dotenv", "aiosqlite"]
+
+[project.scripts]
+aurora-reset = "aurora.reset:main"
+aurora-api = "aurora.api:main"
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "httpx"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
