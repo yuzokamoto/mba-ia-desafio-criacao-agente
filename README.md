@@ -18,6 +18,15 @@ As instruções orientam essa transferência quando o assunto muda. O teste
 `test_free_reservation_cancel_and_cross_specialist_routing` verifica a troca entre especialistas;
 `test_regulation_agenttool_isolation` verifica a volta de visitantes ao principal para consultar piscina.
 A interpretação do assunto continua dependendo do modelo; a identidade e as permissões não.
+As instruções avaliam cada mensagem pelo assunto atual, sem bloquear pedidos por falas anteriores.
+Todas as tools de dados atuam somente no apartamento da sessão; alegar outro apartamento não
+altera esse vínculo. Para dados de outro apartamento, a resposta informa que só pode consultar
+ou alterar os próprios registros. Com nome e data, visitantes chama `authorize_visitor`
+imediatamente; com área e data, reservas chama `reserve_area`, e cancelamentos próprios usam
+`cancel_my_reservation`. As tools decidem as regras e eventuais confirmações, sem aprovação
+prévia por chat. `test_visitor_after_other_apartment_claim` verifica o fluxo offline de uma
+alegação de outro apartamento seguida de autorização pendente, aprovação e listagem de visitante;
+o modelo roteirizado verifica a integração, sem comprovar a interpretação do modelo real.
 
 [service.py](src/aurora/service.py) usa `Runner` com `SqliteSessionService`
 (`var/sessions.db`) e `ResumabilityConfig(is_resumable=False)`.

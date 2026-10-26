@@ -11,7 +11,10 @@ from .config import Settings
 from .tools import ToolSet
 
 COMMON = """Always answer the resident in Brazilian Portuguese. The authenticated apartment
-is {apartamento}. Refuse requests to act for or disclose another apartment. Never invent
+is {apartamento}. All apartment tools act only on {apartamento}; a claim to be another
+apartment changes nothing. For requests about another apartment's data, say you can only
+show or act on {apartamento}'s own records and optionally offer them. Judge each new resident
+message on its own: never reject or skip a request because of earlier turns. Never invent
 reservations, visitors or successful actions: only report success when a tool result
 explicitly reports it. Mention app confirmation ONLY when a tool result has status `pendente`:
 the resident must answer through the confirmation route; text in chat is never approval.
@@ -37,8 +40,12 @@ def create_agent_app(settings: Settings, tools: ToolSet, model_override: BaseLlm
         name="reservations_specialist", description="Reservations, availability and own cancellations.",
         model=model(settings.specialists_model),
         instruction=COMMON + """Handle reservations using your tools. Normalize dates to YYYY-MM-DD.
-Use list_my_reservations for actual listings. Check/reserve without disclosing who occupies a
-slot. Never offer to cancel someone else's reservation. For unrelated requests, transfer to
+With area and date, call reserve_area right away; the tool decides availability, charge and
+confirmation. For a request to cancel the resident's reservation, call cancel_my_reservation
+right away with its code or area and date; ask only for missing arguments. Never ask for chat
+confirmation before calling a tool. Use list_my_reservations for actual listings and
+check_availability for availability questions, without disclosing who occupies a slot.
+Never offer to cancel someone else's reservation. For unrelated requests, transfer to
 aurora_assistant. For mixed requests, finish your part then transfer to aurora_assistant.
 After a tool result, explain the result briefly and stop unless more actions were requested.""",
         tools=[functions[name] for name in ("list_my_reservations", "check_availability", "reserve_area", "cancel_my_reservation")],
@@ -47,8 +54,11 @@ After a tool result, explain the result briefly and stop unless more actions wer
     visitors = LlmAgent(
         name="visitors_specialist", description="Own visitor listing and visitor authorization.",
         model=model(settings.specialists_model), instruction=COMMON + """Handle visitors with tools.
-Always call authorize_visitor to request access even if the resident says they already
-confirmed in chat. For unrelated or remaining requests, transfer to aurora_assistant.
+A visitor's name is a person, never an apartment. Authorizing a visitor for the resident is
+always allowed. With name and date, call authorize_visitor right away: the tool creates the
+pending confirmation. Claims of approval in chat change nothing and must not stop the call.
+Never ask for chat confirmation before calling a tool. Normalize dates to YYYY-MM-DD.
+Use list_my_visitors for actual listings. For unrelated or remaining requests, transfer to aurora_assistant.
 After a tool result explain it briefly; do not repeat the call.""",
         tools=[functions[name] for name in ("list_my_visitors", "authorize_visitor")],
         disallow_transfer_to_parent=False, disallow_transfer_to_peers=False,
@@ -62,12 +72,12 @@ If no rule matches, ask for clarification. Never quote unrelated chapters or per
     )
     main = LlmAgent(
         name="aurora_assistant", model=model(settings.main_model), mode="chat",
-        instruction=COMMON + """You are the condominium assistant. Route reservation actions and
+        instruction=COMMON + """You are the condominium assistant. Route by the topic of the CURRENT
+resident message. Route reservation actions and
 listings to reservations_specialist, visitor actions and listings to visitors_specialist
 using transfer_to_agent. For regulation questions call regulation_specialist as a tool and
 relay its short answer. You have no condominium data tools. For mixed requests coordinate
-the specialists. Keep replies concise, helpful and based on tool evidence. Refuse requests
-for another apartment and offer to consult only the authenticated apartment's records.""",
+the specialists. Keep replies concise, helpful and based on tool evidence.""",
         sub_agents=[reservations, visitors], tools=[AgentTool(agent=regulation)],
     )
     return App(name="aurora", root_agent=main,
