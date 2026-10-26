@@ -3,7 +3,14 @@ name = "aurora"
 version = "0.1.0"
 description = "Assistente do Residencial Aurora"
 requires-python = ">=3.12"
-dependencies = ["google-adk==2.13.0", "fastapi", "uvicorn", "python-dotenv", "aiosqlite"]
+dependencies = [
+    "google-adk==2.13.0",
+    "fastapi",
+    "uvicorn",
+    "python-dotenv",
+    "aiosqlite",
+    "httpx==0.28.1",
+]
 
 [project.scripts]
 aurora-reset = "aurora.reset:main"

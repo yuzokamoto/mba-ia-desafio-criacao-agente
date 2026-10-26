@@ -50,6 +50,12 @@ explica o protocolo; a compatibilidade desta combinação com persistência foi 
 [config.py](src/aurora/config.py) carrega `.env` na inicialização e resolve os nomes dos modelos.
 O cliente Gemini usa `HttpRetryOptions` com quatro tentativas, espera exponencial de 1 a 8 segundos
 e repetição em 429 e 5xx. Erros permanentes ou quota esgotada ainda podem impedir uma conversa.
+Em [models.py](src/aurora/models.py), `ResilientGemini.generate_content_async` repete falhas
+`httpx.TransportError` até três vezes adicionais (1, 2 e 4 segundos), somente sem streaming
+e antes da primeira resposta. Se o Runner ainda falhar, `ConversationService.run` em
+[service.py](src/aurora/service.py) registra a exceção e retorna HTTP 200 no formato normal,
+com aviso de problema temporário e pendências relidas da sessão persistida; em confirmações,
+informa o registro da resposta quando o `FunctionResponse` já está persistido.
 A suíte automatizada é offline e bloqueia chamadas a modelos reais.
 
 ## Garantias

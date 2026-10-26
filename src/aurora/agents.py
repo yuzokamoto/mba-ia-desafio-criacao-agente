@@ -3,11 +3,11 @@
 from google.adk.agents import LlmAgent
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.models.base_llm import BaseLlm
-from google.adk.models.google_llm import Gemini
 from google.adk.tools import AgentTool
 from google.genai import types
 
 from .config import Settings
+from .models import ResilientGemini
 from .tools import ToolSet
 
 COMMON = """Always answer the resident in Brazilian Portuguese. The authenticated apartment
@@ -32,7 +32,7 @@ def create_agent_app(settings: Settings, tools: ToolSet, model_override: BaseLlm
     def model(name):
         if model_override is not None:
             return model_override
-        return Gemini(model=name, retry_options=types.HttpRetryOptions(
+        return ResilientGemini(model=name, retry_options=types.HttpRetryOptions(
             attempts=4, initial_delay=1, max_delay=8, exp_base=2,
             http_status_codes=[429, *range(500, 600)]))
 

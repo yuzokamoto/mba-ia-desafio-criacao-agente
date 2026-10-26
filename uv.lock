@@ -63,6 +63,7 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "fastapi" },
     { name = "google-adk" },
+    { name = "httpx" },
     { name = "python-dotenv" },
     { name = "uvicorn" },
 ]
@@ -79,6 +80,7 @@ requires-dist = [
     { name = "aiosqlite" },
     { name = "fastapi" },
     { name = "google-adk", specifier = "==2.13.0" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "python-dotenv" },
     { name = "uvicorn" },
 ]

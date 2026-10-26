@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -20,6 +21,7 @@ from pydantic import PrivateAttr
 from aurora.agents import create_agent_app
 from aurora.api import create_app
 from aurora.config import DEFAULT_MODEL, Settings
+from aurora.models import ResilientGemini
 from aurora.regulation import Regulation
 from aurora.storage import Storage
 from aurora.tools import ToolSet
@@ -43,6 +45,8 @@ class ScriptedModel(BaseLlm):
         self._requests.append((role, llm_request.model_dump(mode="json")))
         assert self._scripts[role], f"Resposta não roteirizada para {role}"
         action = self._scripts[role].popleft()
+        if isinstance(action, Exception):
+            raise action
         if isinstance(action, tuple):
             name, args = action
             part = types.Part(function_call=types.FunctionCall(name=name, args=args))
@@ -119,6 +123,101 @@ async def pending_reservation(client, model, sid, date="2030-04-20", route=True)
     assert len(pending) == 1, result
     assert pending[0]["detalhes"] == {"area": "salao-de-festas", "data": date, "taxa": 150.0}
     return pending[0]["id"]
+
+
+@pytest.fixture
+def resilient_script(setup, monkeypatch):
+    settings, script = setup
+
+    async def scripted_gemini(self, llm_request, stream=False):
+        async for response in script.generate_content_async(llm_request, stream=stream):
+            yield response
+
+    # Substitui somente o transporte/base; o loop de ResilientGemini é o real.
+    monkeypatch.setattr(Gemini, "generate_content_async", scripted_gemini)
+    sleep = AsyncMock()
+    monkeypatch.setattr("aurora.models.asyncio.sleep", sleep)
+    model = ResilientGemini(model="offline-script", retry_options=types.HttpRetryOptions(attempts=4))
+    return settings, script, model, sleep
+
+
+@pytest.mark.parametrize("error_type", [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
+                                       httpx.ReadTimeout, httpx.ConnectError, httpx.ConnectTimeout])
+async def test_transport_retry_message(resilient_script, error_type, caplog):
+    settings, script, model, sleep = resilient_script
+    script.add("main", error_type("falha offline"), "Olá, morador!")
+    async with client_for(settings, model) as (client, service):
+        sid = await session(client)
+        assert await message(client, sid, "Olá") == {
+            "resposta": "Olá, morador!", "confirmacoes_pendentes": []}
+        assert len(script._requests) == 2
+        assert len([event for event in (await service.session(sid)).events if event.author == "user"]) == 1
+    sleep.assert_awaited_once_with(1)
+    assert "repetição 1/3" in caplog.text
+    assert model.retry_options.attempts == 4
+
+
+async def test_transport_exhaustion_degrades_message(resilient_script, caplog):
+    settings, script, model, sleep = resilient_script
+    script.add("main", *(httpx.ReadError("falha offline") for _ in range(4)))
+    async with client_for(settings, model) as (client, _):
+        sid = await session(client)
+        result = await message(client, sid)
+        assert "problema temporário" in result["resposta"]
+        assert "Tente novamente" in result["resposta"]
+        assert "registrada" not in result["resposta"]
+        assert result["confirmacoes_pendentes"] == []
+        script.add("main", "Conexão recuperada.")
+        assert (await message(client, sid))["resposta"] == "Conexão recuperada."
+    assert [args.args[0] for args in sleep.await_args_list] == [1, 2, 4]
+    assert any(record.exc_info for record in caplog.records if "Falha no Runner" in record.message)
+
+
+async def test_confirmation_model_failure_keeps_reservation_once(resilient_script):
+    settings, script, model, sleep = resilient_script
+    async with client_for(settings, model) as (client, service):
+        sid = await session(client)
+        cid = await pending_reservation(client, script, sid)
+        script.add("reservations", *(httpx.ReadError("falha offline") for _ in range(4)))
+        result = await confirm(client, sid, cid)
+        assert "Sua resposta à confirmação foi registrada." in result["resposta"]
+        assert "problema temporário" in result["resposta"]
+        assert result["confirmacoes_pendentes"] == []
+        rows = service.storage.reservations("101")
+        assert len([row for row in rows if row["data"] == "2030-04-20"]) == 1
+        assert (await tool_results(service, sid, "reserve_area"))[-1]["status"] == "reservada"
+        await confirm(client, sid, cid, status=409)
+        assert service.storage.reservations("101") == rows
+    assert [args.args[0] for args in sleep.await_args_list] == [1, 2, 4]
+    async with client_for(settings, ScriptedModel()) as (client, service):
+        await confirm(client, sid, cid, status=409)
+        assert service.storage.reservations("101") == rows
+
+
+@pytest.mark.parametrize("stream,after_response,error_type", [
+    (True, False, httpx.ReadError),
+    (False, True, httpx.ReadError),
+    (False, False, ValueError),
+])
+async def test_retry_propagates_without_replay(monkeypatch, stream, after_response, error_type):
+    error = error_type("falha offline")
+    calls = []
+
+    async def failing(self, llm_request, stream=False):
+        calls.append(stream)
+        if after_response:
+            yield LlmResponse(content=types.Content(parts=[types.Part(text="Resposta inicial")]))
+        raise error
+
+    monkeypatch.setattr(Gemini, "generate_content_async", failing)
+    model = ResilientGemini(model="offline-script")
+    responses = []
+    with pytest.raises(error_type) as caught:
+        async for response in model.generate_content_async(None, stream=stream):
+            responses.append(response)
+    assert caught.value is error
+    assert calls == [stream]
+    assert len(responses) == int(after_response)
 
 
 async def test_taxed_confirmation_and_replay(setup):

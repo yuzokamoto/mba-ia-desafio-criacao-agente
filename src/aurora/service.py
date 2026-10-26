@@ -1,6 +1,7 @@
 """Orquestração do Runner e confirmações por sessão persistida."""
 
 import asyncio
+import logging
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -16,6 +17,7 @@ from .tools import ToolSet
 APP_NAME = "aurora"
 USER_ID = "resident"
 CONFIRMATION = "adk_request_confirmation"
+logger = logging.getLogger(__name__)
 
 
 def pending_confirmations(events):
@@ -83,10 +85,33 @@ class ConversationService:
 
     async def run(self, session_id, content):
         final_text = ""
-        async for event in self.runner.run_async(user_id=USER_ID, session_id=session_id, new_message=content):
-            if event.is_final_response() and event.content and event.author != "user":
-                text = "".join(part.text for part in event.content.parts or [] if part.text and not part.thought)
-                if text:
-                    final_text = text
+        failed = False
+        try:
+            async for event in self.runner.run_async(user_id=USER_ID, session_id=session_id, new_message=content):
+                if event.is_final_response() and event.content and event.author != "user":
+                    text = "".join(part.text for part in event.content.parts or [] if part.text and not part.thought)
+                    if text:
+                        final_text = text
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("Falha no Runner da sessão %s.", session_id)
+            failed = True
         session = await self.session(session_id)
+        if failed:
+            final_text = "O assistente teve um problema temporário. Tente novamente em instantes."
+            confirmation_ids = {part.function_response.id for part in content.parts or []
+                                if part.function_response and part.function_response.name == CONFIRMATION}
+            # O Runner persiste o FunctionResponse do usuário antes de executar o agente.
+            # O ADK reexecuta a tool confirmada (aprovação/negação) antes de chamar o
+            # modelo: se essa chamada posterior falhar, a ação/negação já foi aplicada.
+            # A resposta persistida remove a pendência e confirm() impede respondê-la
+            # duas vezes. Falhas anteriores à tool não garantem execução da ação;
+            # por isso só informamos o registro da resposta, conferido na sessão.
+            if confirmation_ids and any(
+                response.id in confirmation_ids
+                for event in session.events if event.author == "user"
+                for response in event.get_function_responses()
+            ):
+                final_text = "Sua resposta à confirmação foi registrada. " + final_text
         return {"resposta": final_text, "confirmacoes_pendentes": pending_confirmations(session.events)}
