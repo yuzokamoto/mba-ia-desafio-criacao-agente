@@ -105,6 +105,8 @@ A suíte automatizada é offline e bloqueia chamadas a modelos reais.
    Os eventos ADK ficam em outro arquivo SQLite e são retornados completos por
    `event.model_dump(mode="json", by_alias=True, exclude_none=True)` em [api.py](src/aurora/api.py).
    Os testes verificam reinício, códigos, colisões forçadas, restauração e persistência das alterações.
+   O modelo não participa da gravação, da geração de códigos nem da recuperação dos eventos:
+   tudo isso é feito por código e por SQLite, antes e depois de qualquer chamada ao modelo.
 
 4. **Regulamento consultado por assunto.** Em [regulation.py](src/aurora/regulation.py),
    `Regulation.__init__` separa os títulos `## Capítulo`; `search` pontua palavras sem acentos,
@@ -113,6 +115,8 @@ A suíte automatizada é offline e bloqueia chamadas a modelos reais.
    Os testes cobrem piscina aos domingos (Capítulo IV, fechamento às 20h), silêncio, mudanças,
    animais e garagem, além de inspecionar os eventos e os pedidos ao modelo principal.
    O texto integral dos demais capítulos não passa pela tool nem entra no histórico do morador.
+   O modelo só escolhe o texto da pergunta: a separação em capítulos, a pontuação e o limite
+   de um capítulo por busca estão em código, e o principal nunca recebe o texto do regulamento.
 
 5. **Uma reserva por área/data no instante da escrita.** Em [storage.py](src/aurora/storage.py),
    o índice `active_slot` é `UNIQUE(area, data) WHERE status = 'ativa'`.
@@ -156,8 +160,11 @@ Os preços pagos por 1 milhão de tokens de entrada/saída consultados foram, re
 3.8-flash US$ 0,75 / US$ 3,75. Todos os modelos sondados disponíveis têm camada gratuita
 ([preços oficiais](https://ai.google.dev/gemini-api/docs/pricing)).
 O padrão `gemini-3.1-flash-lite` foi escolhido pelo menor custo entre os modelos validados:
-o avaliador executou com ele o fluxo completo do desafio (etapas 1–14), incluindo reinício e
-aprovações concorrentes, com 49/49 verificações aprovadas e nenhum HTTP 429.
+um avaliador caixa-preta via HTTP executou com ele o fluxo completo do desafio (etapas 1–14),
+incluindo reinício por Ctrl+C e aprovações concorrentes. Com a versão final, foram cinco
+execuções consecutivas com 51/51 verificações aprovadas, nenhuma resposta 500 e nenhum HTTP 429.
+Rodadas anteriores revelaram uma recusa indevida de visitante e uma falha de transporte,
+corrigidas nas instruções e em `ResilientGemini`, conforme descrito em Arquitetura.
 O morador deve conferir os limites ativos do próprio projeto no Google AI Studio.
 
 ```bash
