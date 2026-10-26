@@ -18,7 +18,7 @@ from google.genai import types
 from pydantic import PrivateAttr
 
 from aurora.api import create_app
-from aurora.config import Settings
+from aurora.config import DEFAULT_MODEL, Settings
 from aurora.regulation import Regulation
 from aurora.storage import Storage
 from aurora.tools import ToolSet
@@ -103,6 +103,12 @@ async def events(client, sid):
     return response.json()
 
 
+async def tool_results(service, sid, name):
+    persisted = await service.session(sid)
+    return [response.response for event in persisted.events
+            for response in event.get_function_responses() if response.name == name]
+
+
 async def pending_reservation(client, model, sid, date="2030-04-20", route=True):
     if route:
         model.add("main", transfer("reservations"))
@@ -126,6 +132,9 @@ async def test_taxed_confirmation_and_replay(setup):
         result = await confirm(client, sid, cid, False)
         assert result["confirmacoes_pendentes"] == []
         assert len(service.storage.reservations("101")) == 1
+        denied = (await tool_results(service, sid, "reserve_area"))[-1]
+        assert denied == {"status": "negada",
+                          "mensagem": "Confirmação negada pelo morador; nada foi executado."}
         await confirm(client, sid, cid, status=409)
         cid = await pending_reservation(client, model, sid, route=False)
         other = await session(client, "201")
@@ -133,6 +142,11 @@ async def test_taxed_confirmation_and_replay(setup):
         model.add("reservations", "Reserva realizada.")
         result = await confirm(client, sid, cid)
         assert result["confirmacoes_pendentes"] == []
+        approved = (await tool_results(service, sid, "reserve_area"))[-1]
+        assert approved["status"] == "reservada"
+        assert approved["taxa"] == 150.0
+        assert approved["cobranca"] is True
+        assert approved["mensagem"] == "Reserva confirmada. Cobrança de R$ 150,00 gerada."
         rows = service.storage.reservations("101")
         assert len([row for row in rows if row["data"] == "2030-04-20"]) == 1
         await confirm(client, sid, cid, status=409)
@@ -201,6 +215,11 @@ async def test_free_reservation_cancel_and_cross_specialist_routing(setup):
         sid = await session(client)
         for text in ("Reserve a quadra", "Cancele a quadra de março", "Meus visitantes?", "Minhas reservas?"):
             assert (await message(client, sid, text))["confirmacoes_pendentes"] == []
+        free = (await tool_results(service, sid, "reserve_area"))[-1]
+        assert free["status"] == "reservada"
+        assert free["taxa"] == 0
+        assert free["cobranca"] is False
+        assert free["mensagem"] == "Reserva confirmada. Sem cobrança."
         assert [r["data"] for r in service.storage.reservations("101")] == ["2030-04-06"]
     async with client_for(settings, ScriptedModel()) as (_, service):
         assert [r["data"] for r in service.storage.reservations("101")] == ["2030-04-06"]
@@ -324,3 +343,37 @@ def test_tools_reject_tampered_identity_and_validate_arguments(tmp_path):
     context.state["apartamento"] = "101"
     assert "areas_validas" in tools["reserve_area"]("inexistente", "2030-04-20", context)
     assert "erro" in tools["reserve_area"]("quadra", "20300420", context)
+
+
+@pytest.mark.parametrize("area,fee", [("quadra", 0), ("salao-de-festas", 150.0)])
+def test_reservation_tool_replay_preserves_charge_details(tmp_path, area, fee):
+    storage = Storage(tmp_path / "aurora.db", DATA)
+    storage.register_session("sid", "101")
+    reserve = ToolSet(storage).build()["reserve_area"]
+    context = SimpleNamespace(session=SimpleNamespace(id="sid"), state={"apartamento": "101"},
+                              function_call_id="call", tool_confirmation=SimpleNamespace(confirmed=True))
+    first = reserve(area, "2030-04-20", context)
+    context.tool_confirmation = None
+    assert reserve(area, "2030-04-20", context) == first
+    assert first["status"] == "reservada"
+    assert first["taxa"] == fee
+    assert first["cobranca"] is (fee > 0)
+    assert len([r for r in storage.reservations("101") if r["data"] == "2030-04-20"]) == 1
+    with storage.connect() as db:
+        stored = json.loads(db.execute("SELECT result FROM operations WHERE id='sid:call'").fetchone()[0])
+    assert first == {**stored, "taxa": fee, "cobranca": fee > 0, "mensagem": first["mensagem"]}
+
+
+def test_default_model_and_empty_environment(monkeypatch):
+    monkeypatch.setattr("aurora.config.load_dotenv", lambda *args, **kwargs: None)
+    for name in ("AURORA_MODEL", "AURORA_MODEL_MAIN", "AURORA_MODEL_SPECIALISTS"):
+        monkeypatch.setenv(name, "")
+    assert DEFAULT_MODEL == "gemini-3.1-flash-lite"
+    assert Settings().model == Settings().main_model == Settings().specialists_model == DEFAULT_MODEL
+    settings = Settings.from_env()
+    assert settings.model == settings.main_model == settings.specialists_model == DEFAULT_MODEL
+    monkeypatch.setenv("AURORA_MODEL", "custom-default")
+    monkeypatch.setenv("AURORA_MODEL_MAIN", "custom-main")
+    settings = Settings.from_env()
+    assert settings.model == settings.specialists_model == "custom-default"
+    assert settings.main_model == "custom-main"

@@ -40,7 +40,7 @@ class ToolSet:
                 hint="Responda à confirmação no aplicativo para executar a ação.", payload=payload)
             return {"status": "pendente", "mensagem": "Confirmação pendente: responda pelo aplicativo."}
         if not context.tool_confirmation.confirmed:
-            return {"status": "negada", "mensagem": "Ação não executada."}
+            return {"status": "negada", "mensagem": "Confirmação negada pelo morador; nada foi executado."}
         return None
 
     def build(self):
@@ -79,14 +79,26 @@ class ToolSet:
                 return {"erro": "Área desconhecida.", "areas_validas": self.areas}
             if not self.date(date):
                 return {"erro": "Use uma data no formato AAAA-MM-DD."}
-            if not self.storage.available(selected["id"], date):
-                return {"status": "ocupada", "mensagem": "A data está ocupada."}
-            if selected["taxa"] > 0:
-                pending = self.confirmation(tool_context, {"area": selected["id"], "data": date, "taxa": selected["taxa"]})
-                if pending:
-                    return pending
-            return self.storage.reserve(apartment, selected["id"], date,
-                                        f"{tool_context.session.id}:{tool_context.function_call_id}")
+            operation_id = f"{tool_context.session.id}:{tool_context.function_call_id}"
+            with self.storage.connect() as db:
+                previous = db.execute("SELECT result FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if previous:
+                result = json.loads(previous[0])
+            else:
+                if not self.storage.available(selected["id"], date):
+                    return {"status": "ocupada", "mensagem": "A data está ocupada."}
+                if selected["taxa"] > 0:
+                    pending = self.confirmation(tool_context, {"area": selected["id"], "data": date, "taxa": selected["taxa"]})
+                    if pending:
+                        return pending
+                result = self.storage.reserve(apartment, selected["id"], date, operation_id)
+            if result["status"] == "reservada":
+                fee = self.area(result["area"])["taxa"]
+                formatted_fee = f"{fee:,.2f}".translate(str.maketrans({",": ".", ".": ","}))
+                result = {**result, "taxa": fee, "cobranca": fee > 0,
+                          "mensagem": (f"Reserva confirmada. Cobrança de R$ {formatted_fee} gerada."
+                                       if fee > 0 else "Reserva confirmada. Sem cobrança.")}
+            return result
 
         def cancel_my_reservation(tool_context: ToolContext, code: str | None = None,
                                   area: str | None = None, date: str | None = None) -> dict:

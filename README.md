@@ -41,7 +41,7 @@ explica o protocolo; a compatibilidade desta combinação com persistência foi 
 [config.py](src/aurora/config.py) carrega `.env` na inicialização e resolve os nomes dos modelos.
 O cliente Gemini usa `HttpRetryOptions` com quatro tentativas, espera exponencial de 1 a 8 segundos
 e repetição em 429 e 5xx. Erros permanentes ou quota esgotada ainda podem impedir uma conversa.
-Nenhum teste ou smoke check chama um modelo real.
+A suíte automatizada é offline e bloqueia chamadas a modelos reais.
 
 ## Garantias
 
@@ -49,9 +49,15 @@ Nenhum teste ou smoke check chama um modelo real.
    `reserve_area` consulta a taxa do catálogo e chama `ToolSet.confirmation` para taxa positiva;
    `authorize_visitor` sempre chama essa função. Sem `tool_context.tool_confirmation`,
    o código executa `tool_context.request_confirmation(payload=...)` e retorna sem gravar.
-   Com `confirmed=False`, retorna negada; somente aprovação permite escrever.
+   Com `confirmed=False`, retorna `status="negada"` e informa que o morador negou a confirmação
+   e nada foi executado; somente aprovação permite escrever.
    Os detalhes incluem `area/data/taxa` ou `nome/data`. Área ocupada é recusada antes de pedir
-   confirmação; quadra sem taxa grava diretamente. O apartamento não é argumento de tool.
+   confirmação; quadra sem taxa grava diretamente. O resultado de sucesso inclui `taxa`,
+   `cobranca` e `mensagem`: quadra retorna `cobranca=false` e "Reserva confirmada. Sem cobrança.";
+   salão aprovado retorna `cobranca=true` e "Reserva confirmada. Cobrança de R$ 150,00 gerada.".
+   Repetir a mesma chamada recupera o resultado armazenado com esses campos, sem nova escrita.
+   As instruções só permitem mencionar confirmação no aplicativo com `status="pendente"`;
+   depois do sucesso, não pedem nova confirmação. O apartamento não é argumento de tool.
    Em [service.py](src/aurora/service.py), `pending_confirmations` varre **todos** os eventos:
    cada chamada `adk_request_confirmation` sem resposta de função com o mesmo ID é uma pendência.
    A ação vem de `originalFunctionCall.name` e os detalhes de `toolConfirmation.payload`.
@@ -123,13 +129,21 @@ Preencha o `.env` local (ignorado pelo Git):
 | --- | --- |
 | `GOOGLE_GENAI_USE_VERTEXAI` | Use `FALSE` para Google AI Studio. |
 | `GOOGLE_API_KEY` | Sua chave do Google AI Studio. |
-| `AURORA_MODEL` | Modelo padrão de todos os agentes; vazio usa `gemini-2.5-flash`. |
+| `AURORA_MODEL` | Modelo padrão de todos os agentes; vazio usa `gemini-3.1-flash-lite`. |
 | `AURORA_MODEL_MAIN` | Sobrescreve o modelo do agente principal; vazio herda o padrão. |
 | `AURORA_MODEL_SPECIALISTS` | Sobrescreve o modelo dos três especialistas; vazio herda o padrão. |
 
-**TODO(reviewer):** o padrão `gemini-2.5-flash` é provisório; finalizar após sondar modelos e
-limites disponíveis com a chave real. A qualidade do roteamento e a redação das respostas
-precisam dessa validação; os testes offline verificam os controles e o protocolo, não a qualidade de um Gemini.
+**Escolha do modelo.** Na sondagem de 25/10/2026 com a chave do Google AI Studio,
+`gemini-2.5-flash` e `gemini-2.5-flash-lite` retornaram 404 (indisponíveis para novos usuários).
+Funcionaram `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`, `gemini-3.5-flash` e `gemini-3.8-flash`.
+Os preços pagos por 1 milhão de tokens de entrada/saída consultados foram, respectivamente:
+3.1-flash-lite US$ 0,25 / US$ 1,50; 3.5-flash-lite US$ 0,30 / US$ 2,50;
+3.8-flash US$ 0,75 / US$ 3,75. Todos os modelos sondados disponíveis têm camada gratuita
+([preços oficiais](https://ai.google.dev/gemini-api/docs/pricing)).
+O padrão `gemini-3.1-flash-lite` foi escolhido pelo menor custo entre os modelos validados:
+o avaliador executou com ele o fluxo completo do desafio (etapas 1–14), incluindo reinício e
+aprovações concorrentes, com 49/49 verificações aprovadas e nenhum HTTP 429.
+O morador deve conferir os limites ativos do próprio projeto no Google AI Studio.
 
 ```bash
 uv run aurora-reset
@@ -164,13 +178,14 @@ SESSION_ID='substitua-pelo-id-da-sessao'
 curl -s -X POST "http://localhost:8000/sessoes/$SESSION_ID/mensagens" \
   -H 'Content-Type: application/json' \
   -d '{"texto":"Reserve o salão de festas para 2030-04-20"}'
-# 200: {"resposta":"...","confirmacoes_pendentes":[{"id":"...","acao":"reserve_area","detalhes":{"area":"salao-de-festas","data":"2030-04-20","taxa":150.0}}]}
+# 200: {"resposta":"Confirme a reserva pelo aplicativo.","confirmacoes_pendentes":[{"id":"...","acao":"reserve_area","detalhes":{"area":"salao-de-festas","data":"2030-04-20","taxa":150.0}}]}
 
 CONFIRMATION_ID='substitua-pelo-id-da-confirmacao'
 curl -i -X POST "http://localhost:8000/sessoes/$SESSION_ID/confirmacoes" \
   -H 'Content-Type: application/json' \
   -d "{\"id\":\"$CONFIRMATION_ID\",\"confirmado\":true}"
-# Use false para negar; 200 no mesmo formato da rota de mensagens.
+# 200: {"resposta":"Reserva confirmada. Cobrança de R$ 150,00 gerada.","confirmacoes_pendentes":[]}
+# Use false para negar; 200 no mesmo formato, informando que nada foi executado pela negativa.
 # Repetir o mesmo ID ou enviar ID não pendente recebe 409.
 
 curl -s "http://localhost:8000/sessoes/$SESSION_ID/eventos"
@@ -180,6 +195,7 @@ curl -i http://localhost:8000/sessoes/sessao-inexistente/eventos
 ```
 
 `resposta` é o último texto final do agente nesta execução e pode ser vazio durante uma pausa.
+Os textos dos exemplos são ilustrativos; a redação final depende do modelo.
 `confirmacoes_pendentes` sempre inclui todas as pendências ainda não respondidas da sessão.
 Sessões inexistentes recebem 404 nas três rotas com `session_id`.
 Apartamento desconhecido na criação recebe 404; rotas de verificação para apartamento desconhecido
